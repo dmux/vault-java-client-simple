@@ -1,0 +1,129 @@
+name: Build and Release
+
+on:
+  push:
+    branches: [main, develop]
+    tags:
+      - "v*.*.*"
+  pull_request:
+    branches: [main, develop]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build and Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 8
+        uses: actions/setup-java@v4
+        with:
+          java-version: "8"
+          distribution: "temurin"
+          cache: "maven"
+
+      - name: Run unit tests
+        run: mvn clean test -Dtest='!**/*IntegrationTest'
+
+      - name: Build JAR
+        run: mvn package -DskipTests
+
+      - name: Get version from pom.xml
+        id: version
+        run: |
+          VERSION=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout)
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Building version: $VERSION"
+
+      - name: Upload JAR artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: java-vault-client-${{ steps.version.outputs.version }}
+          path: |
+            target/*.jar
+            !target/*-sources.jar
+            !target/*-javadoc.jar
+          retention-days: 90
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: target/surefire-reports/
+          retention-days: 30
+
+  release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 8
+        uses: actions/setup-java@v4
+        with:
+          java-version: "8"
+          distribution: "temurin"
+          cache: "maven"
+
+      - name: Extract version from tag
+        id: version
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/v}
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Release version: $VERSION"
+
+      - name: Update version in pom.xml
+        run: mvn versions:set -DnewVersion=${{ steps.version.outputs.version }} -DgenerateBackupPoms=false
+
+      - name: Build release artifacts
+        run: |
+          mvn clean package -DskipTests
+          mvn source:jar
+          mvn javadoc:jar
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            target/java-vault-client-${{ steps.version.outputs.version }}.jar
+            target/java-vault-client-${{ steps.version.outputs.version }}-sources.jar
+            target/java-vault-client-${{ steps.version.outputs.version }}-javadoc.jar
+            pom.xml
+          generate_release_notes: true
+          draft: false
+          prerelease: false
+          body: |
+            ## 📦 Artifacts
+
+            ### Maven Usage
+            ```xml
+            <dependency>
+                <groupId>com.github.dmux</groupId>
+                <artifactId>java-vault-client</artifactId>
+                <version>${{ steps.version.outputs.version }}</version>
+            </dependency>
+            ```
+
+            ### Direct Download
+            - **Main JAR**: `java-vault-client-${{ steps.version.outputs.version }}.jar`
+            - **Sources**: `java-vault-client-${{ steps.version.outputs.version }}-sources.jar`
+            - **Javadoc**: `java-vault-client-${{ steps.version.outputs.version }}-javadoc.jar`
+
+            ### Manual Installation
+            ```bash
+            # Download JAR
+            wget https://github.com/dmux/vault-java-client-simple/releases/download/v${{ steps.version.outputs.version }}/java-vault-client-${{ steps.version.outputs.version }}.jar
+
+            # Add to your project classpath
+            java -cp java-vault-client-${{ steps.version.outputs.version }}.jar:your-app.jar com.example.Main
+            ```
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
